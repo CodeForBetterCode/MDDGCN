@@ -15,7 +15,7 @@ def perturb_features(x, sigma=0.0):
     return (x + noise).to('cuda')
 
 
-class MDDGCN_v4(torch.nn.Module):
+class MDDGCN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, intermediate_channels, out_channels,
                  feature_dims, attention_hidden=128, perturb_features_p=0.0, dropout_edge_p=0.0):
         super().__init__()
