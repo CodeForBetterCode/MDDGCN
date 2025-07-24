@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn.conv import TransformerConv, GCNConv, GATConv, ChebConv
+from torch_geometric.nn.conv import TransformerConv, GCNConv, GATConv
 from torch_geometric.nn.norm import LayerNorm
 from torch_geometric.nn.dense import Linear
 from torch_geometric.utils import dropout_adj, negative_sampling, remove_self_loops, add_self_loops,dropout_edge
@@ -14,65 +14,83 @@ def perturb_features(x, sigma=0.0):
     noise = torch.randn_like(x) * sigma
     return (x + noise).to('cuda')
 
-class MDDGCN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels, intermediate_channels, out_channels, 
-                 feature_dims, K=2, attention_hidden=128,perturb_features_p=0.0,dropout_edge_p=0.0):
-        super(MDDGCN, self).__init__()
+
+class MDDGCN_v4(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, intermediate_channels, out_channels,
+                 feature_dims, attention_hidden=128, perturb_features_p=0.0, dropout_edge_p=0.0):
+        super().__init__()
         self.feature_dims = feature_dims
-        self.perturb_features_p = perturb_features_p
-        self.dropout_edge_p = dropout_edge_p
         self.total_features = sum(feature_dims)
+        self.perturb_features_p = perturb_features_p
         self.attention_fc = torch.nn.Sequential(
             torch.nn.Linear(self.total_features, attention_hidden),
             torch.nn.ReLU(),
             torch.nn.Linear(attention_hidden, len(feature_dims))
-        ) 
-        self.conv1 = ChebConv(in_channels, hidden_channels, K)
-        self.bn1 = torch.nn.BatchNorm1d(hidden_channels)
-        self.conv2 = ChebConv(hidden_channels, intermediate_channels, K)
-        self.bn2 = torch.nn.BatchNorm1d(intermediate_channels)
-        self.conv3 = ChebConv(intermediate_channels, out_channels, K)
-        self.bn3 = torch.nn.BatchNorm1d(out_channels)
-        self.fc_main = torch.nn.Sequential(
-            torch.nn.Linear(in_channels, intermediate_channels),
-            torch.nn.ReLU(),
-            torch.nn.BatchNorm1d(intermediate_channels)
         )
-        self.fc_aux = torch.nn.Sequential(
-            torch.nn.Linear(in_channels, out_channels),
-            torch.nn.ReLU(),
-            torch.nn.BatchNorm1d(out_channels)
-        )
-        self.alpha_main = torch.nn.Parameter(torch.tensor(0.5)) 
-        self.alpha_aux = torch.nn.Parameter(torch.tensor(0.5)) 
-        self.dropout = torch.nn.Dropout(p=0.5)
 
-    def apply_dynamic_attention(self, x):
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.bn1 = torch.nn.BatchNorm1d(hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, intermediate_channels)
+        self.bn2 = torch.nn.BatchNorm1d(intermediate_channels)
+        self.conv3 = GCNConv(intermediate_channels, out_channels)
+        self.bn3 = torch.nn.BatchNorm1d(out_channels)
+
+        if in_channels == hidden_channels:
+            self.res_connector1 = torch.nn.Identity()
+        else:
+            self.res_connector1 = torch.nn.Linear(in_channels, hidden_channels)
+            
+        if hidden_channels == intermediate_channels:
+            self.res_connector2 = torch.nn.Identity()
+        else:
+            self.res_connector2 = torch.nn.Linear(hidden_channels, intermediate_channels)
+
+        self.fc_main = torch.nn.Linear(in_channels, intermediate_channels)
+        self.fc_aux = torch.nn.Linear(in_channels, out_channels)
+
+        self.gate_main = torch.nn.Sequential(torch.nn.Linear(intermediate_channels * 2, 1), torch.nn.Sigmoid())
+        self.gate_aux = torch.nn.Sequential(torch.nn.Linear(out_channels * 2, 1), torch.nn.Sigmoid())
+        
+        self.dropout = torch.nn.Dropout(0.4)
+        self.classifier = torch.nn.Sequential(
+            torch.nn.Linear(out_channels, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, 1)
+        )
+
+    def apply_node_attention(self, x):
         start = 0
-        weighted_x = torch.zeros_like(x)
-        raw_weights = self.attention_fc(x.mean(dim=0, keepdim=True)) 
-        dynamic_weights = torch.nn.functional.softmax(raw_weights, dim=-1).squeeze(0) 
-        for dim, weight in zip(self.feature_dims, dynamic_weights):
-            weighted_x[:, start:start + dim] = x[:, start:start + dim] * weight
+        weights = F.softmax(self.attention_fc(x), dim=-1)
+        out = torch.zeros_like(x)
+        for i, dim in enumerate(self.feature_dims):
+            out[:, start:start+dim] = x[:, start:start+dim] * weights[:, i].unsqueeze(-1)
             start += dim
-        return weighted_x
+        return out
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
-        initial_x = x.clone() 
-        # x = perturb_features(x, sigma=self.perturb_features_p)     
-        # edge_index, _ = dropout_edge(edge_index, p=self.dropout_edge_p, force_undirected=True,training=self.training)
-        x = self.apply_dynamic_attention(x)
-        x = F.relu(self.bn1(self.conv1(x, edge_index)))
-        x = self.dropout(x)
-        x = F.relu(self.bn2(self.conv2(x, edge_index)))
-        x = self.dropout(x)
-        initial_x_main = self.fc_main(initial_x) 
-        x = F.relu((1 - self.alpha_main) * x + self.alpha_main * initial_x_main)
+        initial_x = x
+        x = perturb_features(x, sigma=self.perturb_features_p)     
+        x_after_attention = self.apply_node_attention(x)
+        x1_out = F.relu(self.bn1(self.conv1(x_after_attention, edge_index)))
+        x1_out = self.dropout(x1_out)
+        res1 = self.res_connector1(x_after_attention)
+        x_after_conv1 = x1_out + res1
+        x2_out = F.relu(self.bn2(self.conv2(x_after_conv1, edge_index)))
+        x_after_conv2 = self.dropout(x2_out)
+        res2 = self.res_connector2(x_after_conv1)
+        x = x_after_conv2 + res2
+        main_res = F.relu(self.fc_main(initial_x))
+        gate_m_input = torch.cat([x, main_res], dim=-1)
+        gate_m = self.gate_main(gate_m_input)
+        x = gate_m * x + (1 - gate_m) * main_res
         x = self.bn3(self.conv3(x, edge_index))
-        initial_x_aux = self.fc_aux(initial_x)  
-        x = F.relu((1 - self.alpha_aux) * x + self.alpha_aux * initial_x_aux) 
-        return x
+        aux_res = F.relu(self.fc_aux(initial_x))
+        gate_a_input = torch.cat([x, aux_res], dim=-1)
+        gate_a = self.gate_aux(gate_a_input)
+        x = gate_a * x + (1 - gate_a) * aux_res
+        return self.classifier(x)
+
         
 # according to https://github.com/NBStarry/CGMega/blob/main/model.py
 class CGMega(torch.nn.Module):

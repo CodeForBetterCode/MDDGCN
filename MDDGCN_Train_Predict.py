@@ -33,6 +33,8 @@ parser.add_argument('--attention_hidden', type=int, default=128, help='Number of
 parser.add_argument('--ChetK',type=int, default=2, help='ChebNet of K')
 parser.add_argument('--GATHeads',type=int, default=2, help='GAT of heads')
 parser.add_argument('--scheduler', type=str, default='StepLR', help='model of scheduler',choices=['StepLR', 'CosineAnnealingLR'])
+parser.add_argument('--perturb_features_p', type=float, default=0, choices=[0.01,0.02,0.03, 0.04,0.05,0.06,0.07,0.08,0.09,0.10,0.11,0.12,0.13,0.14,0.15,0.16,0.17,0.18,0.19,0.20])
+parser.add_argument('--dropout_edge_p', type=float, default=0, choices=[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0])
 
 
 args = parser.parse_args()
@@ -98,12 +100,11 @@ from model import MDDGCN
 # model initialization
 def initialize_model(args):
     feature_dims =torch.tensor( [1273, 185, 377, 458, 192] , device=device) # 
-    if 'MDDGCN' in args.modeltype:    
+    if 'MDDGCN' == args.modeltype:    
         model = MDDGCN(in_channels=data.x.shape[1],hidden_channels=args.hidden_channels, intermediate_channels=args.intermediate_channels, out_channels=1, feature_dims=feature_dims,feature_weights=feature_weights,K=args.ChetK,attention_hidden=args.attention_hidden,perturb_features_p=args.perturb_features_p,dropout_edge_p=args.dropout_edge_p).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
-    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=5, verbose=True)
-    # scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs) 
+
     if 'StepLR' in args.scheduler:
         # every 100 epochs, learning rate decay to 0.9 of original    
         scheduler = StepLR(optimizer, step_size=100, gamma=0.9) 
@@ -277,7 +278,7 @@ folder_name = "result_part_C/D"
 
 os.makedirs(folder_name, exist_ok=True)
 
-file_name = f"model_metrics3_{timestamp}.csv"
+file_name = f"model_metrics3_{timestamp}_{args.epochs}_{args.scheduler}_{args.perturb_features_p}.csv"
 
 file_path = os.path.join(folder_name, file_name)
 

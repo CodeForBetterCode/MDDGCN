@@ -17,7 +17,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 parser = argparse.ArgumentParser(description='Model Training')
 
-parser.add_argument('--modeltype', type=str, default='MDDGCN', help='model of prdict',choices=['GCN', 'GAT', 'ChebNet', 'GraphSAGE','MDDGCN','CGMega','EMOGI'])
+parser.add_argument('--modeltype', type=str, default='MDDGCN', help='model of prdict',choices=['GCN', 'GAT', 'ChebNet', 'GraphSAGE','MDDGCN','CGMega','EMOGI','MDDGCN'])
 parser.add_argument('--epochs', type=int, default=2500, help='Number of epochs to train the model')
 parser.add_argument('--learning_rate', type=float, default=0.0001, help='Learning rate for the optimizer')
 parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for the optimizer')
@@ -74,7 +74,7 @@ print(data)
 ng = np.where(data.y== 1)[0]
 print(f'positive sample size：{len(ng)}')
 ngg = ng = np.where(data.y== 0)[0]
-print(f'negative sample size{len(ngg)}')
+print(f'negative sample size：{len(ngg)}')
 
 data = data.to(device)
 
@@ -83,15 +83,15 @@ train_mask = (data.y == 0) | (data.y == 1)
 test_mask = (data.y == -1) 
 
 from model import MDDGCN
+
 # model initialization
 def initialize_model(args):
     feature_dims =torch.tensor( [1273, 185, 377, 458, 192] , device=device) # 
-    if 'MDDGCN' in args.modeltype:    
-        model = MDDGCN(in_channels=data.x.shape[1],hidden_channels=args.hidden_channels, intermediate_channels=args.intermediate_channels, out_channels=1, feature_dims=feature_dims,feature_weights=feature_weights,K=args.ChetK,attention_hidden=args.attention_hidden,perturb_features_p=args.perturb_features_p,dropout_edge_p=args.dropout_edge_p).to(device)
+    if 'MDDGCN' == args.modeltype:
+        model = MDDGCN(in_channels=data.x.shape[1],hidden_channels=args.hidden_channels, intermediate_channels=args.intermediate_channels, out_channels=1, feature_dims=feature_dims,attention_hidden=args.attention_hidden,perturb_features_p=args.perturb_features_p,dropout_edge_p=args.dropout_edge_p).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
-    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.8, patience=5, verbose=True)
-    # scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs) 
+
     if 'StepLR' in args.scheduler:
         # every 100 epochs, learning rate decay to 0.9 of original    
         scheduler = StepLR(optimizer, step_size=100, gamma=0.9) 
@@ -110,6 +110,14 @@ ACC = np.zeros(shape=(10, 5))
 AUC = np.zeros(shape=(10, 5))
 AUPR = np.zeros(shape=(10, 5))
 F1 = np.zeros(shape=(10, 5))
+
+best_experiment = -1
+best_auc = -1 
+best_metrics = {}
+
+worst_experiment = -1
+worst_mean_auc = float('inf')
+worst_metrics = {}
 
 # performance evaluation in 10 times of 5 fold cross validation
 for experiment in range(10): 
@@ -152,6 +160,34 @@ for experiment in range(10):
         AUPR[experiment][fold] = ap
         F1[experiment][fold] = f1
 
+    mean_acc = ACC[experiment].mean()
+    mean_auc = AUC[experiment].mean()
+    mean_aupr = AUPR[experiment].mean()
+    mean_f1 = F1[experiment].mean()
+    
+    print(f'→ Mean Results of Experiment {experiment + 1}: ACC: {mean_acc:.4f}, AUC: {mean_auc:.4f}, AUPR: {mean_aupr:.4f}, F1: {mean_f1:.4f}')
+
+    # write the best one
+    if mean_auc > best_auc:
+        best_auc = mean_auc
+        best_experiment = experiment + 1
+        best_metrics = {
+            'ACC': mean_acc,
+            'AUC': mean_auc,
+            'AUPR': mean_aupr,
+            'F1': mean_f1
+        }
+    # write the worst one
+    if mean_auc < worst_mean_auc:
+        worst_mean_auc = mean_auc
+        worst_experiment = experiment + 1
+        worst_metrics = {
+            'ACC': mean_acc,
+            'AUC': mean_auc,
+            'AUPR': mean_aupr,
+            'F1': mean_f1
+        }
+
 mean_ACC = ACC.mean()
 mean_AUC = AUC.mean()
 mean_AUPR = AUPR.mean()
@@ -164,7 +200,7 @@ current_time = datetime.now().strftime('%Y%m%d_%H%M%S')
 
 file_name = f'result_{current_time}_{args.modeltype}.csv'
 
-result_folder = 'paper_result_part1+2'
+result_folder = 'paper_result_part1+2_test'
 full_path = os.path.join(result_folder, file_name)
 
 if not os.path.exists(result_folder):
@@ -181,10 +217,14 @@ with open(full_path, 'w') as file:
     file.write(f'feature: {args.feature}\n')
     file.write(f'perturb_features_p: {args.perturb_features_p}\n')
     file.write(f'dropout_edge_p: {args.dropout_edge_p}\n')
+    file.write(f'scheduler: {args.scheduler}\n')
+    file.write(f'attention_hidden: {args.attention_hidden}\n')
     file.write(f'Mean Accuracy: {mean_ACC}\n')
     file.write(f'Mean AUC: {mean_AUC}\n')
     file.write(f'Mean AUPR: {mean_AUPR}\n')
     file.write(f'Mean F1 Score: {mean_F1}\n')
+    file.write(f'Best Mean Metrics: ACC: {best_metrics["ACC"]:.4f}, AUC: {best_metrics["AUC"]:.4f}, AUPR: {best_metrics["AUPR"]:.4f}, F1: {best_metrics["F1"]:.4f}\n')
+    file.write(f'Worst Mean Metrics: ACC: {worst_metrics["ACC"]:.4f}, AUC: {worst_metrics["AUC"]:.4f}, AUPR: {worst_metrics["AUPR"]:.4f}, F1: {worst_metrics["F1"]:.4f}\n')
     file.write('\n') 
 
 print("Data saved to  CSV file successfully.")
